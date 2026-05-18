@@ -26,4 +26,16 @@ if ! echo "$output" | grep -q "devenv\.nix"; then
     exit 1
 fi
 
+# Regression lock for the original symptom of #2820: a stale
+# `warning: Ignoring the client-specified setting 'system'…` line was
+# shadowing the real syntax error in the headline. The headline (line
+# starting with `× Failed`) must never carry that warning text.
+plain=$(echo "$output" | sed 's/\x1b\[[0-9;]*[A-Za-z]//g')
+headline=$(echo "$plain" | grep "× Failed" | head -n1)
+if echo "$headline" | grep -q "Ignoring the client-specified setting"; then
+    echo "Test failed: stale warning is shadowing the real error in the headline"
+    echo "Headline: $headline"
+    exit 1
+fi
+
 echo "OK: syntax error correctly reported"

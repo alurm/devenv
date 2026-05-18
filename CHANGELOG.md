@@ -17,6 +17,7 @@
 - Fixed long lines in `devenv shell` getting a hard newline inserted at the wrap point when copying to clipboard. The shell now preserves the soft-wrap when flushing wrapped output into the terminal's scrollback, so clipboard copy keeps the original single line ([#2865](https://github.com/cachix/devenv/issues/2865)).
 - Fixed files declared with the `files` option not being regenerated when an auto-loaded (`devenv allow`) shell reloaded after `devenv update`. enterShell tasks (including `devenv:files`) now re-run on hot-reload, matching a fresh shell entry, instead of only updating environment variables ([#2864](https://github.com/cachix/devenv/issues/2864)).
 - Fixed `devenv test --no-tui` (and any other non-TUI invocation) silently discarding all output from the `enterTest` script, so the test runner's output, traces, and failure messages never reached the terminal or CI logs. Output from commands run in the shell is now printed in non-TUI mode.
+- Surfaced the actionable `error: …` paragraph from Nix evaluation diagnostics as the headline instead of burying it under ~100 lines of `--show-trace` frames. For example, the "use `devenv inputs add …`" suggestion that follows from a missing input in `devenv.yaml` now appears next to the "Failed to …" line; the full trace moves to the `help:` section ([#2820](https://github.com/cachix/devenv/issues/2820)).
 
 ### Improvements
 
