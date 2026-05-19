@@ -33,20 +33,36 @@ pub(crate) fn strip_leading_ansi(s: &str) -> &str {
 /// internal evaluation context. Splitting lets the caller surface the
 /// paragraph as the headline diagnostic and demote the trace.
 ///
-/// Returns `("", text)` when no `error:` line is found, so callers can fall
-/// back to a single-block rendering.
+/// Match rule: an `error:` line counts as a paragraph boundary only when it
+/// is preceded by a blank line (or sits at the start of input). Once there is
+/// leading trace/noise before the first matching `error:` line, that first
+/// match is the Nix boundary; everything after it belongs to the user-facing
+/// error block, even if a user-authored multi-line `throw` contains later
+/// blank-line paragraphs that start with `error:`.
+///
+/// Returns `("", text)` when no qualifying `error:` line is found, so callers
+/// can fall back to a single-block rendering.
 pub(crate) fn split_trailing_error(text: &str) -> (&str, &str) {
-    let mut last_error_start: Option<usize> = None;
+    let mut error_start: Option<usize> = None;
+    let mut prev_was_blank = true; // start of input counts as "preceded by blank"
     let mut line_start = 0;
     for line in text.split_inclusive('\n') {
-        let after_indent = line.trim_start();
-        let after_ansi = strip_leading_ansi(after_indent);
-        if after_ansi.starts_with("error:") {
-            last_error_start = Some(line_start);
+        let line_no_eol = line.strip_suffix('\n').unwrap_or(line);
+        let is_blank = line_no_eol.trim().is_empty();
+        if !is_blank && prev_was_blank {
+            let after_indent = line_no_eol.trim_start();
+            let after_ansi = strip_leading_ansi(after_indent);
+            if after_ansi.starts_with("error:") {
+                if line_start > 0 && error_start != Some(0) {
+                    return (text[..line_start].trim_end(), text[line_start..].trim_end());
+                }
+                error_start = Some(line_start);
+            }
         }
+        prev_was_blank = is_blank;
         line_start += line.len();
     }
-    match last_error_start {
+    match error_start {
         Some(start) => (text[..start].trim_end(), text[start..].trim_end()),
         None => ("", text),
     }
@@ -152,15 +168,77 @@ error: Failed assertions:
 
     #[test]
     fn split_trailing_error_picks_last_error_when_multiple_present() {
-        let text = "error: first error\n  some context\nerror: real error\n  details";
+        // Two error paragraphs separated by a blank line (how Nix renders
+        // chained errors via `addErrorContext` and friends). The newer one
+        // at the bottom wins; the older one stays in the trace.
+        let text = "error: first error\n  some context\n\nerror: real error\n  details";
         let (trace, tail) = split_trailing_error(text);
         assert_eq!(trace, "error: first error\n  some context");
         assert_eq!(tail, "error: real error\n  details");
     }
 
     #[test]
+    fn split_trailing_error_ignores_error_keyword_inside_user_throw_body() {
+        // Regression for the multi-line user-throw bug: a `throw ''…''` whose
+        // body happens to contain `error: ` on one of its lines (without a
+        // preceding blank line) must not be picked as the split point. The
+        // real Nix `error:` keyword that opens the paragraph is what wins.
+        let text = "\
+… while calling the 'throw' builtin
+  at /tmp/devenv.nix:3:15:
+
+error: Step 1: do this
+error: but this is the actual problem
+Step 3: then this";
+        let (trace, tail) = split_trailing_error(text);
+        assert!(trace.contains("… while calling the 'throw' builtin"));
+        assert!(
+            tail.starts_with("error: Step 1: do this"),
+            "headline should open with Nix's real error keyword (the first \
+             error line), not pick the user's literal `error:` text from \
+             the middle of the throw body. tail was: {tail}"
+        );
+        assert!(
+            tail.contains("but this is the actual problem"),
+            "the rest of the user's throw body should stay in the headline"
+        );
+        assert!(
+            tail.ends_with("Step 3: then this"),
+            "the trailing user line should stay in the headline"
+        );
+    }
+
+    #[test]
+    fn split_trailing_error_ignores_error_paragraph_inside_user_throw_body() {
+        // Same as above, but with a blank line before the user's literal
+        // `error:` line. Once the Nix boundary is found, later paragraphs are
+        // still part of the user-facing error body.
+        let text = "\
+… while calling the 'throw' builtin
+  at /tmp/devenv.nix:3:15:
+
+error: Step 1: do this
+
+error: but this is the actual problem
+Step 3: then this";
+        let (trace, tail) = split_trailing_error(text);
+        assert!(trace.contains("… while calling the 'throw' builtin"));
+        assert!(
+            tail.starts_with("error: Step 1: do this"),
+            "headline should open with Nix's real error keyword. tail was: {tail}"
+        );
+        assert!(
+            tail.contains("\n\nerror: but this is the actual problem"),
+            "the blank-line paragraph inside the throw body should stay in the headline"
+        );
+        assert!(tail.ends_with("Step 3: then this"));
+    }
+
+    #[test]
     fn split_trailing_error_handles_ansi_prefixed_error_line() {
-        let text = "trace context\n\u{1b}[31;1merror:\u{1b}[0m boom";
+        // Real Nix output has a blank line between the trace and the
+        // ANSI-colored `error:` paragraph.
+        let text = "trace context\n\n\u{1b}[31;1merror:\u{1b}[0m boom";
         let (trace, tail) = split_trailing_error(text);
         assert_eq!(trace, "trace context");
         assert!(tail.contains("boom"));
