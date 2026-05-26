@@ -53,10 +53,17 @@ pub(crate) fn split_trailing_error(text: &str) -> (&str, &str) {
             let after_indent = line_no_eol.trim_start();
             let after_ansi = strip_leading_ansi(after_indent);
             if after_ansi.starts_with("error:") {
-                if line_start > 0 && error_start != Some(0) {
-                    return (text[..line_start].trim_end(), text[line_start..].trim_end());
+                match error_start {
+                    // Leading trace precedes the first `error:` paragraph, so
+                    // that first match is the Nix boundary; everything after it
+                    // belongs to the user-facing error block.
+                    None if line_start > 0 => {
+                        return (text[..line_start].trim_end(), text[line_start..].trim_end());
+                    }
+                    // Input opens with `error:` (no leading trace): treat the
+                    // paragraphs as chained errors and let the last one win.
+                    _ => error_start = Some(line_start),
                 }
-                error_start = Some(line_start);
             }
         }
         prev_was_blank = is_blank;
@@ -121,6 +128,18 @@ pub(crate) fn dedent_lines(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_trailing_error_last_wins_for_four_chained_errors() {
+        // Regression: with no leading trace and 4+ chained `error:` paragraphs,
+        // the last paragraph must win (only it becomes the headline). The buggy
+        // early-return used to split at the third error, leaking two paragraphs
+        // into the tail.
+        let text = "error: A\n\nerror: B\n\nerror: C\n\nerror: D";
+        let (trace, tail) = split_trailing_error(text);
+        assert_eq!(trace, "error: A\n\nerror: B\n\nerror: C");
+        assert_eq!(tail, "error: D");
+    }
 
     #[test]
     fn strip_leading_ansi_handles_no_codes() {
