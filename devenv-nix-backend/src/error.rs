@@ -40,9 +40,9 @@ pub(crate) fn strip_leading_ansi(s: &str) -> &str {
 /// error block, even if a user-authored multi-line `throw` contains later
 /// blank-line paragraphs that start with `error:`.
 ///
-/// Returns `("", text)` when no qualifying `error:` line is found, so callers
+/// Returns `(None, text)` when no qualifying `error:` line is found, so callers
 /// can fall back to a single-block rendering.
-pub(crate) fn split_trailing_error(text: &str) -> (&str, &str) {
+pub(crate) fn split_trailing_error(text: &str) -> (Option<&str>, &str) {
     let mut error_start: Option<usize> = None;
     let mut prev_was_blank = true; // start of input counts as "preceded by blank"
     let mut line_start = 0;
@@ -57,9 +57,7 @@ pub(crate) fn split_trailing_error(text: &str) -> (&str, &str) {
                     // Leading trace precedes the first `error:` paragraph, so
                     // that first match is the Nix boundary; everything after it
                     // belongs to the user-facing error block.
-                    None if line_start > 0 => {
-                        return (text[..line_start].trim_end(), text[line_start..].trim_end());
-                    }
+                    None if line_start > 0 => return split_at(text, line_start),
                     // Input opens with `error:` (no leading trace): treat the
                     // paragraphs as chained errors and let the last one win.
                     _ => error_start = Some(line_start),
@@ -70,9 +68,19 @@ pub(crate) fn split_trailing_error(text: &str) -> (&str, &str) {
         line_start += line.len();
     }
     match error_start {
-        Some(start) => (text[..start].trim_end(), text[start..].trim_end()),
-        None => ("", text),
+        Some(start) => split_at(text, start),
+        None => (None, text),
     }
+}
+
+/// Split `text` at byte offset `start` into `(trace, error_block)`, trimming
+/// trailing whitespace from each side. A trace that trims down to empty (e.g.
+/// the input opened with `error:` or only blank lines preceded it) is reported
+/// as `None` rather than `Some("")`, so callers don't render an empty trace.
+fn split_at(text: &str, start: usize) -> (Option<&str>, &str) {
+    let trace = text[..start].trim_end();
+    let trace = (!trace.is_empty()).then_some(trace);
+    (trace, text[start..].trim_end())
 }
 
 /// Shape a raw Nix error string into a `MietteDiagnostic` for rendering.
@@ -91,13 +99,12 @@ pub(crate) fn split_trailing_error(text: &str) -> (&str, &str) {
 pub(crate) fn format_eval_error(raw: &str, context: &str) -> miette::MietteDiagnostic {
     let dedented = dedent_lines(raw);
     let (trace, tail) = split_trailing_error(&dedented);
-    if trace.is_empty() {
-        miette::diagnostic!("{context}: {tail}")
-    } else {
-        miette::diagnostic!(
+    match trace {
+        Some(trace) => miette::diagnostic!(
             help = format!("Nix evaluation trace:\n\n{trace}"),
             "{context}: {tail}"
-        )
+        ),
+        None => miette::diagnostic!("{context}: {tail}"),
     }
 }
 
@@ -137,7 +144,7 @@ mod tests {
         // into the tail.
         let text = "error: A\n\nerror: B\n\nerror: C\n\nerror: D";
         let (trace, tail) = split_trailing_error(text);
-        assert_eq!(trace, "error: A\n\nerror: B\n\nerror: C");
+        assert_eq!(trace, Some("error: A\n\nerror: B\n\nerror: C"));
         assert_eq!(tail, "error: D");
     }
 
@@ -159,7 +166,7 @@ mod tests {
     #[test]
     fn split_trailing_error_returns_text_when_no_error_line() {
         let (trace, tail) = split_trailing_error("just some prose\nwith no error keyword");
-        assert_eq!(trace, "");
+        assert_eq!(trace, None);
         assert_eq!(tail, "just some prose\nwith no error keyword");
     }
 
@@ -179,6 +186,7 @@ error: Failed assertions:
 
     $ devenv inputs add git-hooks github:cachix/git-hooks.nix --follows nixpkgs";
         let (trace, tail) = split_trailing_error(text);
+        let trace = trace.expect("leading frames should be returned as the trace");
         assert!(trace.starts_with("… from call site"));
         assert!(trace.ends_with("top-level.nix:45:7:"));
         assert!(tail.starts_with("error: Failed assertions:"));
@@ -192,7 +200,7 @@ error: Failed assertions:
         // at the bottom wins; the older one stays in the trace.
         let text = "error: first error\n  some context\n\nerror: real error\n  details";
         let (trace, tail) = split_trailing_error(text);
-        assert_eq!(trace, "error: first error\n  some context");
+        assert_eq!(trace, Some("error: first error\n  some context"));
         assert_eq!(tail, "error: real error\n  details");
     }
 
@@ -210,6 +218,7 @@ error: Step 1: do this
 error: but this is the actual problem
 Step 3: then this";
         let (trace, tail) = split_trailing_error(text);
+        let trace = trace.expect("the throw frames should be returned as the trace");
         assert!(trace.contains("… while calling the 'throw' builtin"));
         assert!(
             tail.starts_with("error: Step 1: do this"),
@@ -241,6 +250,7 @@ error: Step 1: do this
 error: but this is the actual problem
 Step 3: then this";
         let (trace, tail) = split_trailing_error(text);
+        let trace = trace.expect("the throw frames should be returned as the trace");
         assert!(trace.contains("… while calling the 'throw' builtin"));
         assert!(
             tail.starts_with("error: Step 1: do this"),
@@ -259,7 +269,7 @@ Step 3: then this";
         // ANSI-colored `error:` paragraph.
         let text = "trace context\n\n\u{1b}[31;1merror:\u{1b}[0m boom";
         let (trace, tail) = split_trailing_error(text);
-        assert_eq!(trace, "trace context");
+        assert_eq!(trace, Some("trace context"));
         assert!(tail.contains("boom"));
     }
 
@@ -270,9 +280,19 @@ Step 3: then this";
         // the caller renders the error inline without a help section.
         let text = "error: syntax error, unexpected '}', expecting ';'\n       at /path/to/devenv.nix:5:1:";
         let (trace, tail) = split_trailing_error(text);
-        assert_eq!(trace, "");
+        assert_eq!(trace, None);
         assert!(tail.starts_with("error: syntax error"));
         assert!(tail.contains("devenv.nix"));
+    }
+
+    #[test]
+    fn split_trailing_error_reports_blank_only_lead_as_no_trace() {
+        // The `error:` paragraph is preceded only by blank lines: there is no
+        // real trace, so the (whitespace-only) lead must trim to `None` rather
+        // than leaking a `Some("")` that callers would render as an empty help.
+        let (trace, tail) = split_trailing_error("\n\nerror: boom");
+        assert_eq!(trace, None);
+        assert_eq!(tail, "error: boom");
     }
 
     // ---------------------------------------------------------------------
