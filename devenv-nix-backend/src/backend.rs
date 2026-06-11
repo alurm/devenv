@@ -520,8 +520,10 @@ impl NixCBackend {
     }
 
     fn enrich_eval_error(&self, err: miette::Error, context: &str) -> miette::Error {
-        // Delegate to the pure helper so the shape-the-Nix-output logic can
-        // be unit-tested with synthetic inputs (see `error::format_eval_error`).
+        // Always render the eval-returned error (`{err:#}` flattens the FFI
+        // cause chain), never a log line captured during evaluation: log
+        // warnings arriving at error verbosity used to shadow the real error
+        // (#2820). See `error::format_eval_error` for the rendering rules.
         miette::Report::from(format_eval_error(&format!("{err:#}"), context))
     }
 

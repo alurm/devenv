@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Regression test for https://github.com/cachix/devenv/issues/2820 follow-ups.
+# Regression test for https://github.com/cachix/devenv/issues/2820.
 # When `devenv.yaml` is missing an input that `devenv.nix` references (here
-# `git-hooks`), the actionable "devenv inputs add ..." suggestion should
-# appear right after the error headline, not be buried under ~100 lines of
-# Nix `--show-trace` evaluation frames.
+# `git-hooks`), the eval error carrying the actionable "devenv inputs add ..."
+# suggestion must be printed — not shadowed by a stale Nix warning such as
+# `Ignoring the client-specified setting 'system'`. The error keeps Nix's
+# natural order: trace frames first, the actionable error last, so the
+# suggestion lands at the bottom of the terminal output.
 
 set -uo pipefail
 
@@ -16,35 +18,35 @@ if [ "$status" -eq 0 ]; then
     exit 1
 fi
 
-# Strip ANSI escapes so the line-position check isn't fooled by colors.
+# Strip ANSI escapes so position checks aren't fooled by colors.
 plain=$(echo "$output" | sed 's/\x1b\[[0-9;]*[A-Za-z]//g')
 
-# Find the line number of the diagnostic headline ("× Failed to ..."). The
-# actionable suggestion must follow within a handful of lines, before the
-# `help:` section that carries the `--show-trace` body.
-headline=$(echo "$plain" | grep -n "Failed to get shell attribute" | head -n1 | cut -d: -f1)
-if [ -z "$headline" ]; then
-    echo "Test failed: did not find 'Failed to get shell attribute' headline"
+# The eval error must be surfaced: the actionable suggestion has to be there.
+if ! echo "$plain" | grep -q "devenv inputs add git-hooks"; then
+    echo "Test failed: 'devenv inputs add git-hooks' suggestion was not in the output"
     echo "Output: $output"
     exit 1
 fi
 
-window=$(echo "$plain" | sed -n "${headline},$((headline + 5))p")
-if ! echo "$window" | grep -q "devenv inputs add git-hooks"; then
-    echo "Test failed: 'devenv inputs add git-hooks' suggestion was not in the 5 lines following the headline"
-    echo "Window (lines ${headline}..$((headline + 5))):"
-    echo "$window"
+# The suggestion must come after the trace frames, at the bottom of the
+# output, where the user's cursor lands — not above ~100 lines of
+# `--show-trace` frames that would force scrolling up to find it.
+suggestion_line=$(echo "$plain" | grep -n "devenv inputs add git-hooks" | tail -n1 | cut -d: -f1)
+last_frame_line=$(echo "$plain" | grep -n "… while" | tail -n1 | cut -d: -f1)
+if [ -n "$last_frame_line" ] && [ "$suggestion_line" -lt "$last_frame_line" ]; then
+    echo "Test failed: the suggestion (line $suggestion_line) appears above trace frames (last at line $last_frame_line)"
+    echo "Output: $output"
     exit 1
 fi
 
-# Regression lock for the warning-shadow symptom of #2820 in the
-# missing-input scenario (the second qaristote follow-up). The headline must
-# not carry the stale `Ignoring the client-specified setting 'system'` warning.
-headline_line=$(echo "$plain" | sed -n "${headline}p")
+# Regression lock for the root cause of #2820: the stale
+# `Ignoring the client-specified setting 'system'` warning must not be
+# selected as the error message.
+headline_line=$(echo "$plain" | grep "Failed to get shell attribute" | head -n1)
 if echo "$headline_line" | grep -q "Ignoring the client-specified setting"; then
     echo "Test failed: stale warning is shadowing the real error in the headline"
     echo "Headline: $headline_line"
     exit 1
 fi
 
-echo "OK: missing-input suggestion appears next to the error headline"
+echo "OK: missing-input suggestion is printed below the trace"
